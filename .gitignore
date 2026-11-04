@@ -1,0 +1,17 @@
+# Dependencies and builds
+node_modules/
+build/
+
+# Secrets - never commit these
+.env
+*.csv
+*.pem
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# macOS
+.DS_Store
