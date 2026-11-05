@@ -26,3 +26,16 @@ variable "github_repo" {
   type        = string
   default     = "abbaskhalifa40-art/ecs-threat-composer"
 }
+
+variable "github_repo_subject" {
+  description = "How GitHub identifies the repo in its OIDC token: owner@owner_id/repo@repo_id"
+  type        = string
+
+  # GitHub's OIDC tokens include permanent numeric IDs for the owner and
+  # repo, not just their names. Names can be reused (delete a repo, and
+  # someone else could create one with the same name), but IDs can't, so
+  # matching on IDs means only THIS exact repo can assume the role.
+  # Found by checking the failed AssumeRoleWithWebIdentity event in
+  # CloudTrail. These IDs are public, not secret.
+  default = "abbaskhalifa40-art@352087120/ecs-threat-composer@1446012140"
+}

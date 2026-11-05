@@ -52,8 +52,8 @@ resource "aws_iam_role" "github_actions" {
           #    needs your manual approval in GitHub first).
           # Forks, other branches and pull requests can't assume it.
           "token.actions.githubusercontent.com:sub" = [
-            "repo:${var.github_repo}:ref:refs/heads/main",
-            "repo:${var.github_repo}:environment:production",
+            "repo:${var.github_repo_subject}:ref:refs/heads/main",
+            "repo:${var.github_repo_subject}:environment:production",
           ]
         }
       }
