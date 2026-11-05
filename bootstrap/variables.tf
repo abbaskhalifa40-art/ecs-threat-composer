@@ -20,3 +20,9 @@ variable "ecr_keep_images" {
   type        = number
   default     = 10
 }
+
+variable "github_repo" {
+  description = "GitHub repo allowed to assume the Actions role, as owner/name"
+  type        = string
+  default     = "abbaskhalifa40-art/ecs-threat-composer"
+}

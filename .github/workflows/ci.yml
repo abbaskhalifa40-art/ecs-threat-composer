@@ -1,0 +1,71 @@
+# ci.yml
+# Checks code quality on every push and pull request. Doesn't touch AWS,
+# so it needs no credentials and is safe to run on any branch.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: 1.17.1
+
+jobs:
+  terraform:
+    name: Terraform fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Fails if any .tf file isn't formatted the standard way.
+      # Fix locally with: terraform fmt -recursive
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      # Checks syntax and references without connecting to AWS or the
+      # S3 backend (-backend=false).
+      - name: Validate bootstrap
+        working-directory: bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate infra
+        working-directory: infra
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  security:
+    name: Checkov security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checkov scans Terraform for security misconfigurations (open
+      # security groups, unencrypted storage and so on).
+      # --soft-fail reports findings without failing the build. Once
+      # you've worked through the findings, remove it so new problems
+      # block merges.
+      - name: Run Checkov
+        run: |
+          pipx install checkov
+          checkov -d . --framework terraform --quiet --compact --soft-fail
+
+  docker:
+    name: Docker build test
+    # Only on pull requests: pushes to main already build in deploy.yml.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm # native ARM64, matches Fargate ARM64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (not pushed)
+        run: docker build -t threat-composer:ci app

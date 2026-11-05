@@ -17,3 +17,8 @@ output "region" {
   description = "Region everything was created in"
   value       = var.region
 }
+
+output "github_actions_role_arn" {
+  description = "Paste this into GitHub as the AWS_ROLE_ARN repository variable"
+  value       = aws_iam_role.github_actions.arn
+}

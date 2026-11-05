@@ -1,0 +1,53 @@
+# destroy.yml
+# Tears down the main infrastructure to stop costs. Run it by hand from
+# the Actions tab. Needs approval, like a deploy.
+# Bootstrap (state bucket, ECR, OIDC role) is NOT touched.
+
+name: Destroy infra
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  TF_VERSION: 1.17.1
+
+jobs:
+  destroy:
+    name: Terraform destroy
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          terraform init -input=false \
+            -backend-config="bucket=ecs-threat-composer-tfstate-${ACCOUNT}-${AWS_REGION}"
+
+      # image_tag is a required variable, but its value doesn't matter
+      # when destroying.
+      - name: Terraform destroy
+        run: terraform destroy -input=false -auto-approve -var="image_tag=unused"

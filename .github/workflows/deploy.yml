@@ -1,0 +1,182 @@
+# deploy.yml
+# On every push to main that changes the app or infra:
+#   1. build   - build the image, scan it, push it to ECR
+#   2. plan    - show exactly what Terraform will change
+#   3. apply   - waits for YOUR approval, then deploys
+#
+# Logs in to AWS with OIDC: no AWS keys are stored in GitHub.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "infra/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: # also allows a manual run from the Actions tab
+
+# id-token: write lets the job request an OIDC token from GitHub.
+permissions:
+  id-token: write
+  contents: read
+
+# Only one deploy at a time. A second push waits for the first to finish
+# instead of two applies fighting over the same state.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_REPOSITORY: ecs-threat-composer
+  TF_VERSION: 1.17.1
+
+jobs:
+  build:
+    name: Build, scan and push image
+    runs-on: ubuntu-24.04-arm # native ARM64 runner, no slow emulation
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tag = short commit SHA, matching how we tagged locally.
+      - name: Set image tag
+        id: tag
+        run: echo "image_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image name
+        run: echo "IMAGE=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.image_tag }}" >> "$GITHUB_ENV"
+
+      # ECR tags are immutable, so pushing the same tag twice fails.
+      # If this commit's image already exists (a re-run, or an infra-only
+      # change), skip the build and reuse it.
+      - name: Check if image already exists
+        id: exists
+        run: |
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="${{ steps.tag.outputs.image_tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image already in ECR, skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        if: steps.exists.outputs.exists == 'false'
+        run: docker build -t "$IMAGE" app
+
+      # Trivy scans the image for known vulnerabilities (CVEs).
+      # --exit-code 0 = report only for now. Once the Node base image is
+      # upgraded, change it to 1 so CRITICAL findings block the deploy.
+      - name: Scan image with Trivy
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 \
+            "$IMAGE"
+
+      - name: Push image
+        if: steps.exists.outputs.exists == 'false'
+        run: docker push "$IMAGE"
+
+  plan:
+    name: Terraform plan
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Bucket name is built from the account ID at runtime, so it's
+      # never hardcoded in the repo.
+      - name: Terraform init
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          terraform init -input=false \
+            -backend-config="bucket=ecs-threat-composer-tfstate-${ACCOUNT}-${AWS_REGION}"
+
+      # Writes the plan to the run's summary page, so you can read it
+      # before approving the apply job.
+      - name: Terraform plan
+        run: |
+          terraform plan -input=false -no-color \
+            -var="image_tag=${{ needs.build.outputs.image_tag }}" | tee plan.txt
+          {
+            echo "## Terraform plan for image \`${{ needs.build.outputs.image_tag }}\`"
+            echo '```'
+            grep -E '^(Plan:|No changes)' plan.txt || true
+            echo '```'
+            echo '<details><summary>Full plan</summary>'
+            echo
+            echo '```'
+            cat plan.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Terraform apply
+    needs: [build, plan]
+    runs-on: ubuntu-latest
+    # The "production" environment has a required reviewer, so this job
+    # pauses until you click Approve in GitHub.
+    environment: production
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          terraform init -input=false \
+            -backend-config="bucket=ecs-threat-composer-tfstate-${ACCOUNT}-${AWS_REGION}"
+
+      # Re-plans and applies in one go. Simpler than passing the plan
+      # file between jobs, with a small trade-off: if something changed
+      # between plan and approval, this applies the newer plan.
+      - name: Terraform apply
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="image_tag=${{ needs.build.outputs.image_tag }}"
+
+      - name: Show app URL
+        run: |
+          echo "### App deployed: $(terraform output -raw app_url)" >> "$GITHUB_STEP_SUMMARY"
